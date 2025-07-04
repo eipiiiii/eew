@@ -1,4 +1,3 @@
-
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import websocket
@@ -20,6 +19,7 @@ class AXISEarthquakeGUI:
         self.connected = False
         self.ws = None
         self.data_log = []
+        self.server_url = None
 
         # デフォルトトークンを設定
         default_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyIjp7ImlkIjoiZWlwaWlpaWkiLCJ0eXBlIjowLCJjb25uZWN0aW9uIjoyfSwiY2hhbm5lbHMiOlsiam14LXNlaXNtb2xvZ3kiLCJxdWFrZS1vbmUiLCJlZXciXSwiZXhwIjoxNzU0MDA2Mzk5fQ.bZHDTPisDku1ObKRv7iKUOXyIdCeuUg9mypKKs_b5FI"
@@ -84,6 +84,39 @@ class AXISEarthquakeGUI:
         self.log_message("🏠 AXIS地震情報モニターへようこそ！", "INFO")
         self.log_message("📱 監視チャンネル: jmx-seismology, quake-one, eew", "INFO")
         self.log_message("🔑 トークンを確認して「接続開始」ボタンを押してください", "INFO")
+
+    def get_server_list(self):
+        """AXISサーバーリストを取得"""
+        headers = {
+            "Authorization": f"Bearer {self.token.get()}",
+            "Content-Type": "application/json"
+        }
+
+        possible_urls = [
+            "https://axis.prioris.jp/api/server/list/"
+        ]
+
+        for api_url in possible_urls:
+            try:
+                self.root.after(0, lambda: self.log_message(f"サーバーリスト取得試行: {api_url}", "INFO"))
+                response = requests.get(api_url, headers=headers, timeout=10)
+
+                if response.status_code == 200:
+                    data = response.json()
+                    servers = data.get('servers', [])
+                    if servers:
+                        self.root.after(0, lambda: self.log_message(f"サーバーリスト取得成功: {len(servers)}個のサーバー", "SUCCESS"))
+                        return servers
+                else:
+                    self.root.after(0, lambda: self.log_message(f"エラー {response.status_code}: {response.text}", "ERROR"))
+
+            except requests.exceptions.RequestException as e:
+                self.root.after(0, lambda: self.log_message(f"接続エラー: {e}", "ERROR"))
+            except Exception as e:
+                self.root.after(0, lambda: self.log_message(f"その他のエラー: {e}", "ERROR"))
+
+        self.root.after(0, lambda: self.log_message("サーバーリストAPIが利用できません。推測サーバーを使用します。", "WARNING"))
+        return ["wss://axis.prioris.jp/socket"]
 
     def log_message(self, message, level="INFO"):
         """メッセージをログに追加"""
@@ -153,13 +186,20 @@ class AXISEarthquakeGUI:
     def _connect_websocket(self, token):
         """WebSocket接続処理（別スレッド）"""
         try:
-            # サーバーリストを取得（簡略化）
-            server_url = "wss://axis.prioris.jp/socket"  # 仮のURL
+            servers = self.get_server_list()
+            if not servers:
+                self.root.after(0, lambda: self.log_message("利用可能なサーバーが見つかりません", "ERROR"))
+                self.root.after(0, self._reset_connect_button)
+                return
 
+            self.server_url = servers[0] + "/socket"
+            self.root.after(0, lambda: self.log_message(f"接続先サーバー: {self.server_url}", "INFO"))
+
+            websocket.enableTrace(False)  # デバッグログを無効化
             headers = [f"Authorization: Bearer {token}"]
 
             self.ws = websocket.WebSocketApp(
-                server_url,
+                self.server_url,
                 header=headers,
                 on_message=self.on_message,
                 on_error=self.on_error,
@@ -204,7 +244,7 @@ class AXISEarthquakeGUI:
         try:
             data = json.loads(message)
             channel = data.get('channel', '不明')
-            content = data.get('message', data)
+            content = data.get('message', data) # messageキーがない場合はdata全体を使用
 
             # データログに追加
             self.data_log.append({
@@ -223,65 +263,108 @@ class AXISEarthquakeGUI:
 
     def _display_earthquake_data(self, channel, data):
         """地震データを表示"""
+        self.log_message(f"\n{'='*80}", "DATA")
+        self.log_message(f"🕐 受信時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "DATA")
+        self.log_message(f"📡 チャンネル: {channel}", "DATA")
+        self.log_message(f"{'='*80}", "DATA")
+
         if channel == "jmx-seismology":
-            self.log_message("=== JMX地震学情報（気象庁電文） ===", "DATA")
+            self.log_message("📡 JMX地震学情報（気象庁電文）", "DATA")
+            self.log_message("-" * 40, "DATA")
             if isinstance(data, dict):
-                for key, value in list(data.items())[:10]:  # 最初の10項目のみ表示
-                    self.log_message(f"  {key}: {value}", "DATA")
-                if len(data) > 10:
-                    self.log_message(f"  ... 他{len(data)-10}項目", "DATA")
+                important_keys = ['EventID', 'InfoType', 'Title', 'DateTime', 'Status']
+                for key in important_keys:
+                    if key in data:
+                        self.log_message(f"  🔹 {key}: {data[key]}", "DATA")
+                for key, value in data.items():
+                    if key not in important_keys:
+                        if isinstance(value, (dict, list)):
+                            self.log_message(f"  🔸 {key}: {json.dumps(value, ensure_ascii=False)}", "DATA")
+                        else:
+                            self.log_message(f"  🔸 {key}: {value}", "DATA")
             else:
-                self.log_message(f"  データ: {data}", "DATA")
+                self.log_message(f"  📄 データ: {data}", "DATA")
 
         elif channel == "quake-one":
-            self.log_message("=== QUAKE.ONE地震情報 ===", "DATA")
+            self.log_message("🌍 QUAKE.ONE地震情報", "DATA")
+            self.log_message("-" * 40, "DATA")
             if isinstance(data, dict):
                 if 'earthquake' in data:
-                    eq = data['earthquake']
-                    self.log_message(f"  マグニチュード: {eq.get('magnitude', 'N/A')}", "DATA")
-                    self.log_message(f"  震源地: {eq.get('hypocenter', 'N/A')}", "DATA")
-                    self.log_message(f"  深さ: {eq.get('depth', 'N/A')} km", "DATA")
+                    eq_info = data['earthquake']
+                    self.log_message("  🏔️  震源情報:", "DATA")
+                    self.log_message(f"    📏 マグニチュード: {eq_info.get('magnitude', 'N/A')}", "DATA")
+                    self.log_message(f"    📍 震源地: {eq_info.get('hypocenter', 'N/A')}", "DATA")
+                    self.log_message(f"    🕳️  深さ: {eq_info.get('depth', 'N/A')} km", "DATA")
+                    self.log_message(f"    🕐 発生時刻: {eq_info.get('time', 'N/A')}", "DATA")
                 if 'intensity' in data:
-                    self.log_message(f"  最大震度: {data['intensity'].get('max', 'N/A')}", "DATA")
+                    intensity_info = data['intensity']
+                    self.log_message("  📊 震度情報:", "DATA")
+                    self.log_message(f"    🔥 最大震度: {intensity_info.get('max', 'N/A')}", "DATA")
+                    if 'regions' in intensity_info:
+                        self.log_message("    🗾 地域別震度:", "DATA")
+                        for region in intensity_info['regions'][:5]:
+                            self.log_message(f"      - {region}", "DATA")
+                for key, value in data.items():
+                    if key not in ['earthquake', 'intensity']:
+                        if isinstance(value, (dict, list)):
+                            self.log_message(f"  🔸 {key}: {json.dumps(value, ensure_ascii=False)}", "DATA")
+                        else:
+                            self.log_message(f"  🔸 {key}: {value}", "DATA")
             else:
-                self.log_message(f"  データ: {data}", "DATA")
+                self.log_message(f"  📄 データ: {data}", "DATA")
 
         elif channel == "eew":
-            self.log_message("=== 🚨 緊急地震速報 (EEW) ===", "DATA")
+            self.log_message("🚨 緊急地震速報 (EEW)", "DATA")
+            self.log_message("-" * 40, "DATA")
             if isinstance(data, dict):
-                important_info = []
                 if 'magnitude' in data:
-                    important_info.append(f"M{data['magnitude']}")
-                if 'maxIntensity' in data:
-                    important_info.append(f"最大震度{data['maxIntensity']}")
+                    self.log_message(f"  🔥 マグニチュード: {data['magnitude']}", "DATA")
+                if 'maxIntensity' in data or 'max_intensity' in data:
+                    intensity = data.get('maxIntensity', data.get('max_intensity', 'N/A'))
+                    self.log_message(f"  🔥 最大予想震度: {intensity}", "DATA")
+                if 'origin_time' in data:
+                    self.log_message(f"  ⏰ 発生時刻: {data['origin_time']}", "DATA")
                 if 'hypocenter' in data:
-                    important_info.append(f"{data['hypocenter']}")
-
-                if important_info:
-                    self.log_message(f"  🔥 {' / '.join(important_info)}", "DATA")
+                    self.log_message(f"  📍 震源地: {data['hypocenter']}", "DATA")
+                if 'arrival_time' in data:
+                    self.log_message(f"  ⚡ 到達予想時刻: {data['arrival_time']}", "DATA")
+                if 'warning_time' in data:
+                    self.log_message(f"  ⏰ 警報発表時刻: {data['warning_time']}", "DATA")
+                
+                for key, value in data.items():
+                    important_keys = ['magnitude', 'maxIntensity', 'max_intensity', 'origin_time', 'hypocenter', 'arrival_time', 'warning_time']
+                    if key not in important_keys:
+                        if isinstance(value, (dict, list)):
+                            self.log_message(f"  🔸 {key}: {json.dumps(value, ensure_ascii=False)}", "DATA")
+                        else:
+                            self.log_message(f"  🔸 {key}: {value}", "DATA")
             else:
-                self.log_message(f"  データ: {data}", "DATA")
+                self.log_message(f"  📄 データ: {data}", "DATA")
         else:
-            self.log_message(f"=== {channel} ===", "DATA")
-            self.log_message(f"  {json.dumps(data, ensure_ascii=False)[:200]}...", "DATA")
-
-        self.log_message("", "DATA")  # 空行で区切り
+            self.log_message(f"📄 メッセージ内容:", "DATA")
+            self.log_message(json.dumps(data, ensure_ascii=False, indent=2), "DATA")
 
     def on_error(self, ws, error):
         """WebSocketエラー"""
-        self.root.after(0, lambda: self.log_message(f"WebSocketエラー: {error}", "ERROR"))
+        self.root.after(0, lambda: self.log_message(f"❌ WebSocketエラー: {error}", "ERROR"))
 
     def on_close(self, ws, close_status_code, close_msg):
         """WebSocket接続終了"""
-        self.root.after(0, lambda: self.log_message(f"接続が終了しました (コード: {close_status_code})", "WARNING"))
+        self.connected = False
+        self.root.after(0, lambda: self.log_message(f"🔌 サーバーとの接続が終了しました (コード: {close_status_code})", "WARNING"))
+        if close_msg:
+            self.root.after(0, lambda: self.log_message(f"理由: {close_msg}", "WARNING"))
         self.root.after(0, self._reset_connect_button)
 
     def on_open(self, ws):
         """WebSocket接続開始"""
         self.connected = True
-        self.root.after(0, lambda: self.log_message("AXISサーバーに接続されました！", "SUCCESS"))
+        self.root.after(0, lambda: self.log_message("🌐 AXISサーバーに正常に接続しました！", "SUCCESS"))
         self.root.after(0, lambda: self.connect_button.config(text="接続停止", state="normal"))
         self.root.after(0, lambda: self.status_var.set("🟢 接続中"))
+        self.root.after(0, lambda: self.log_message("📡 地震情報の受信を開始します...", "INFO"))
+        self.root.after(0, lambda: self.log_message("📱 監視中のチャンネル: jmx-seismology, quake-one, eew", "INFO"))
+        self.root.after(0, lambda: self.log_message("⚠️  終了するにはウィンドウを閉じるか「接続停止」ボタンを押してください", "INFO"))
 
         # ハートビート開始
         def heartbeat():
